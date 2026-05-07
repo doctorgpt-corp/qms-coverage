@@ -86,10 +86,14 @@ export default class QmsCoverageReporter implements Reporter {
         : undefined;
 
     const results: EvidenceResult[] = [];
+    let visited = 0;
+    let withSlugs = 0;
     for (const module_ of testModules) {
       for (const testCase of module_.children.allTests()) {
+        visited += 1;
         const slugs = testCase.meta().acSlugs;
         if (!slugs || slugs.length === 0) continue;
+        withSlugs += 1;
         const status = mapStatus(testCase);
         if (status === null) continue;
         results.push({
@@ -101,6 +105,11 @@ export default class QmsCoverageReporter implements Reporter {
         });
       }
     }
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[qms-coverage] visited ${visited} test(s), ${withSlugs} with acSlugs, ${results.length} pushable.`,
+    );
 
     if (results.length === 0) return;
 
