@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qms-coverage"
+version = "0.1.0"
+description = "pytest plugin that pushes per-AC test coverage to the Aletta QMS"
+requires-python = ">=3.10"
+dependencies = ["pytest>=7"]
+
+[project.entry-points.pytest11]
+qms_coverage = "qms_coverage._plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qms_coverage"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/qms_coverage", "pyproject.toml"]
