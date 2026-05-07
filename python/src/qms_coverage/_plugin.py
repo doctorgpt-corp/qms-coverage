@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from typing import Any
@@ -150,11 +151,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             response_body = response.read().decode("utf-8", errors="replace")
             data = json.loads(response_body) if response_body else {}
             recorded = data.get("recorded", len(results))
+            skipped = data.get("skipped") or []
             print(
                 f"\n[qms-coverage] pushed {recorded} evidence row(s) "
                 f"across {len(results)} test(s) on {branch}@{sha[:7]}.",
                 flush=True,
             )
+            if skipped:
+                # The QMS skipped these slugs because they don't exist in
+                # requirement_acceptance — author them via /admin or
+                # /requirements before they'll start showing coverage.
+                lines = "\n".join(f"  - {s}" for s in skipped)
+                print(
+                    f"[qms-coverage] WARN: {len(skipped)} unknown slug(s) "
+                    f"skipped (author them in QMS to start tracking):\n{lines}",
+                    file=sys.stderr,
+                    flush=True,
+                )
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(

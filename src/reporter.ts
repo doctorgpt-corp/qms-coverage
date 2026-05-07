@@ -86,14 +86,10 @@ export default class QmsCoverageReporter implements Reporter {
         : undefined;
 
     const results: EvidenceResult[] = [];
-    let visited = 0;
-    let withSlugs = 0;
     for (const module_ of testModules) {
       for (const testCase of module_.children.allTests()) {
-        visited += 1;
         const slugs = testCase.meta().acSlugs;
         if (!slugs || slugs.length === 0) continue;
-        withSlugs += 1;
         const status = mapStatus(testCase);
         if (status === null) continue;
         results.push({
@@ -105,11 +101,6 @@ export default class QmsCoverageReporter implements Reporter {
         });
       }
     }
-
-    // eslint-disable-next-line no-console
-    console.log(
-      `[qms-coverage] visited ${visited} test(s), ${withSlugs} with acSlugs, ${results.length} pushable.`,
-    );
 
     if (results.length === 0) return;
 
@@ -129,13 +120,23 @@ export default class QmsCoverageReporter implements Reporter {
       );
     }
     const ok = (await response.json().catch(() => null)) as
-      | { recorded?: number }
+      | { recorded?: number; skipped?: string[] }
       | null;
     const count = ok?.recorded ?? results.length;
+    const skipped = ok?.skipped ?? [];
     // eslint-disable-next-line no-console
     console.log(
       `[qms-coverage] pushed ${count} evidence row(s) across ${results.length} test(s) on ${branch}@${sha.slice(0, 7)}.`,
     );
+    if (skipped.length > 0) {
+      // The QMS skipped these slugs because they don't exist in
+      // requirement_acceptance — author them via /admin or /requirements
+      // before they'll start showing coverage.
+      process.stderr.write(
+        `[qms-coverage] WARN: ${skipped.length} unknown slug(s) skipped (author them in QMS to start tracking):\n` +
+          skipped.map((s) => `  - ${s}\n`).join(""),
+      );
+    }
   }
 }
 
