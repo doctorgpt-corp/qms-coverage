@@ -1,11 +1,17 @@
 """pytest plugin internals for qms-coverage.
 
-Registers the ``qms_covers`` marker, validates slugs at collection time,
-captures per-test status during the call phase, and writes an evidence
-manifest to ``QMS_EVIDENCE_OUT`` at session end. A separate publish step
-(see the ``qms-coverage-publish`` Node CLI) renders a job summary and
-POSTs the manifest to the QMS — keeping test failures and QMS-availability
-failures decoupled.
+Registers the ``qms_covers`` marker, captures per-test evidence as it
+passes through pytest, and writes a manifest to ``QMS_EVIDENCE_OUT`` at
+session end. A separate publish step (the ``qms-coverage-publish`` Node
+CLI) renders a job summary and POSTs the manifest to the QMS — keeping
+test failures and QMS-availability failures decoupled.
+
+xdist behaviour: when running under ``pytest-xdist``, evidence is
+attached to the ``TestReport.user_properties`` on the worker (which
+``xdist`` serialises back to the controller) and accumulated on the
+controller in ``pytest_runtest_logreport``. Only the controller writes
+the manifest at session end; workers and any non-aggregator processes
+return early to avoid racing on the output path.
 """
 
 from __future__ import annotations
@@ -22,10 +28,16 @@ import pytest
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _RESULTS_ATTR = "_qms_coverage_results"
-_SLUGS_KEY = "qms_ac_slugs"
+_EVIDENCE_KEY = "qms_evidence_row"
+
+# Stash for pytest_runtest_logreport, which only receives ``report`` as
+# an argument and so cannot reach ``config`` directly.
+_active_config: pytest.Config | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    global _active_config
+    _active_config = config
     config.addinivalue_line(
         "markers",
         "qms_covers(*slugs): record per-AC test evidence to the Aletta QMS. "
@@ -53,7 +65,6 @@ def pytest_collection_modifyitems(
                     f"qms-coverage: {item.nodeid} has invalid slug {slug!r}. "
                     f"Slugs must be kebab-case (lowercase letters, digits, single hyphens)."
                 )
-        item.user_properties.append((_SLUGS_KEY, slugs))
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -64,9 +75,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     # setup/teardown failures are captured as test failures here too.
     if report.when != "call":
         return
-    slugs = _slugs_for(item)
-    if not slugs:
+    marker = item.get_closest_marker("qms_covers")
+    if marker is None:
         return
+    slugs = list(marker.args)
     if report.outcome == "passed":
         status = "passed"
     elif report.outcome == "failed":
@@ -77,19 +89,45 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
         return
     duration_ms = int((report.duration or 0.0) * 1000)
     test_file = item.location[0] if item.location else item.nodeid.split("::", 1)[0]
-    results: list[dict[str, Any]] = getattr(item.session.config, _RESULTS_ATTR)
-    results.append(
-        {
-            "testId": item.nodeid,
-            "testFile": test_file,
-            "status": status,
-            "durationMs": duration_ms,
-            "acSlugs": list(slugs),
-        }
-    )
+    row = {
+        "testId": item.nodeid,
+        "testFile": test_file,
+        "status": status,
+        "durationMs": duration_ms,
+        "acSlugs": slugs,
+    }
+    # Attach the row to the report. ``user_properties`` rides through
+    # xdist's report transport, so the controller can pick it up via
+    # pytest_runtest_logreport even when this hook ran on a worker.
+    report.user_properties.append((_EVIDENCE_KEY, row))
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    # Workers fire logreport locally too; skip there. Only the controller
+    # (or a single-process run) writes the manifest at session end, so any
+    # worker-side accumulation would be wasted and would also race the
+    # controller for the output path.
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    if report.when != "call":
+        return
+    if _active_config is None:
+        return
+    results: list[dict[str, Any]] | None = getattr(_active_config, _RESULTS_ATTR, None)
+    if results is None:
+        return
+    for key, value in report.user_properties:
+        if key == _EVIDENCE_KEY:
+            results.append(value)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # The controller (or a single-process run) is the only writer. Workers
+    # have only a slice of the results in their own session.config, and a
+    # worker-side write would race the controller for QMS_EVIDENCE_OUT.
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+
     out_path = os.environ.get("QMS_EVIDENCE_OUT")
     if not out_path:
         return
@@ -137,13 +175,6 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         f"on {branch}@{sha[:7]}.",
         flush=True,
     )
-
-
-def _slugs_for(item: pytest.Item) -> list[str]:
-    for key, value in item.user_properties:
-        if key == _SLUGS_KEY:
-            return value
-    return []
 
 
 def _safe_git(args: str) -> str | None:
