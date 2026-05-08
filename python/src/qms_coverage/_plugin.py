@@ -1,8 +1,11 @@
 """pytest plugin internals for qms-coverage.
 
 Registers the ``qms_covers`` marker, validates slugs at collection time,
-captures per-test status during the call phase, and pushes an evidence
-manifest to the QMS at session end when ``QMS_CI_TOKEN`` is set.
+captures per-test status during the call phase, and writes an evidence
+manifest to ``QMS_EVIDENCE_OUT`` at session end. A separate publish step
+(see the ``qms-coverage-publish`` Node CLI) renders a job summary and
+POSTs the manifest to the QMS — keeping test failures and QMS-availability
+failures decoupled.
 """
 
 from __future__ import annotations
@@ -11,9 +14,7 @@ import json
 import os
 import re
 import subprocess
-import sys
-import urllib.error
-import urllib.request
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -89,19 +90,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    token = os.environ.get("QMS_CI_TOKEN")
-    if not token:
+    out_path = os.environ.get("QMS_EVIDENCE_OUT")
+    if not out_path:
         return
 
     results: list[dict[str, Any]] = getattr(session.config, _RESULTS_ATTR, [])
-    if not results:
-        return
-
-    url = (os.environ.get("QMS_URL") or "").rstrip("/")
-    if not url:
-        raise RuntimeError(
-            "qms-coverage: QMS_CI_TOKEN is set but QMS_URL is not."
-        )
 
     branch = os.environ.get("GITHUB_REF_NAME") or _safe_git("rev-parse --abbrev-ref HEAD")
     if not branch:
@@ -136,47 +129,14 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if run_url:
         manifest["runUrl"] = run_url
 
-    body = json.dumps(manifest).encode("utf-8")
-    request = urllib.request.Request(
-        f"{url}/api/evidence",
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"\n[qms-coverage] wrote {len(results)} evidence row(s) to {out_path} "
+        f"on {branch}@{sha[:7]}.",
+        flush=True,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response_body = response.read().decode("utf-8", errors="replace")
-            data = json.loads(response_body) if response_body else {}
-            recorded = data.get("recorded", len(results))
-            skipped = data.get("skipped") or []
-            print(
-                f"\n[qms-coverage] pushed {recorded} evidence row(s) "
-                f"across {len(results)} test(s) on {branch}@{sha[:7]}.",
-                flush=True,
-            )
-            if skipped:
-                # The QMS skipped these slugs because they don't exist in
-                # requirement_acceptance — author them via /admin or
-                # /requirements before they'll start showing coverage.
-                lines = "\n".join(f"  - {s}" for s in skipped)
-                print(
-                    f"[qms-coverage] WARN: {len(skipped)} unknown slug(s) "
-                    f"skipped (author them in QMS to start tracking):\n{lines}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"qms-coverage: POST {url}/api/evidence {e.code}: {body_text}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"qms-coverage: POST {url}/api/evidence failed: {e.reason}"
-        ) from e
 
 
 def _slugs_for(item: pytest.Item) -> list[str]:

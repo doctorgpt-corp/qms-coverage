@@ -1,4 +1,6 @@
 import { execSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Reporter, TestRunEndReason } from "vitest/reporters";
 import type { TestCase, TestModule } from "vitest/node";
 import type { SerializedError } from "@vitest/utils";
@@ -22,7 +24,8 @@ type Manifest = {
 };
 
 /**
- * Vitest reporter that pushes per-AC test evidence to the Aletta QMS.
+ * Vitest reporter that writes per-AC test evidence to a JSON manifest
+ * for a separate publish step to upload to the Aletta QMS.
  *
  * Wiring (vitest.config.ts):
  *   import QmsCoverageReporter from "@aletta/qms-coverage/reporter";
@@ -30,11 +33,8 @@ type Manifest = {
  *     test: { reporters: ["default", new QmsCoverageReporter()] },
  *   });
  *
- * Required env at push time:
- *   - QMS_CI_TOKEN  Bearer token minted in the QMS at /admin/ci-tokens.
- *                   When unset, the reporter no-ops (so `bun test`
- *                   locally never tries to publish).
- *   - QMS_URL       Base URL of the QMS (e.g. https://qms.brainshelf.org).
+ * Activation: set QMS_EVIDENCE_OUT to the manifest path. When unset
+ * the reporter no-ops, so `bun test` locally never produces a file.
  *
  * Run context (filled from GitHub Actions env first, then `git` as a
  * fallback for non-GH CI):
@@ -43,9 +43,8 @@ type Manifest = {
  *   - GITHUB_RUN_ID      → runId
  *   - GITHUB_SERVER_URL + GITHUB_REPOSITORY + GITHUB_RUN_ID → runUrl
  *
- * If the token is set but branch or SHA can't be determined, the
- * reporter throws — better to fail CI loudly than to silently lose
- * evidence.
+ * If branch or SHA can't be determined, the reporter throws — better
+ * to fail CI loudly than to silently lose evidence.
  */
 export default class QmsCoverageReporter implements Reporter {
   async onTestRunEnd(
@@ -53,15 +52,8 @@ export default class QmsCoverageReporter implements Reporter {
     _unhandledErrors: ReadonlyArray<SerializedError>,
     _reason: TestRunEndReason,
   ): Promise<void> {
-    const token = process.env.QMS_CI_TOKEN;
-    if (!token) return;
-
-    const url = (process.env.QMS_URL ?? "").replace(/\/$/, "");
-    if (!url) {
-      throw new Error(
-        "qms-coverage: QMS_CI_TOKEN is set but QMS_URL is not.",
-      );
-    }
+    const outPath = process.env.QMS_EVIDENCE_OUT;
+    if (!outPath) return;
 
     const branch = process.env.GITHUB_REF_NAME ?? safeGit("rev-parse --abbrev-ref HEAD");
     if (!branch) {
@@ -102,41 +94,14 @@ export default class QmsCoverageReporter implements Reporter {
       }
     }
 
-    if (results.length === 0) return;
-
     const manifest: Manifest = { branch, sha, runId, runUrl, results };
-    const response = await fetch(`${url}/api/evidence`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(manifest),
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(
-        `qms-coverage: POST ${url}/api/evidence ${response.status}: ${body}`,
-      );
-    }
-    const ok = (await response.json().catch(() => null)) as
-      | { recorded?: number; skipped?: string[] }
-      | null;
-    const count = ok?.recorded ?? results.length;
-    const skipped = ok?.skipped ?? [];
+    const dir = dirname(outPath);
+    if (dir && dir !== ".") mkdirSync(dir, { recursive: true });
+    writeFileSync(outPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     // eslint-disable-next-line no-console
     console.log(
-      `[qms-coverage] pushed ${count} evidence row(s) across ${results.length} test(s) on ${branch}@${sha.slice(0, 7)}.`,
+      `[qms-coverage] wrote ${results.length} evidence row(s) to ${outPath} on ${branch}@${sha.slice(0, 7)}.`,
     );
-    if (skipped.length > 0) {
-      // The QMS skipped these slugs because they don't exist in
-      // requirement_acceptance — author them via /admin or /requirements
-      // before they'll start showing coverage.
-      process.stderr.write(
-        `[qms-coverage] WARN: ${skipped.length} unknown slug(s) skipped (author them in QMS to start tracking):\n` +
-          skipped.map((s) => `  - ${s}\n`).join(""),
-      );
-    }
   }
 }
 
