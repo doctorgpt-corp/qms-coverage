@@ -1,6 +1,6 @@
 {
   "name": "@aletta/qms-coverage",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -33,7 +33,7 @@
     "url": "git+ssh://git@github.com/doctorgpt-corp/qms-coverage.git"
   },
   "scripts": {
-    "build": "tsc && tsc --project tsconfig.cjs.json && node -e \"require('node:fs').writeFileSync('dist/cjs/package.json', '{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
+    "build": "bunx tsc && bunx tsc --project tsconfig.cjs.json && node -e \"require('node:fs').writeFileSync('dist/cjs/package.json', '{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "prepare": "bun run build",
     "typecheck": "tsc --noEmit"
   },
