@@ -30,6 +30,22 @@ _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _RESULTS_ATTR = "_qms_coverage_results"
 _EVIDENCE_KEY = "qms_evidence_row"
 
+
+def _covers_slugs(item: pytest.Item) -> list[str]:
+    """All AC slugs declared on a test, unioned across every ``qms_covers``
+    marker. ``@covers`` decorators stack — two stacked decorators produce two
+    markers — so we iterate them all rather than reading only the closest one
+    (``get_closest_marker`` returns a single marker, which silently dropped
+    every slug but the innermost). Order is preserved and duplicates removed."""
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for marker in item.iter_markers("qms_covers"):
+        for slug in marker.args:
+            if slug not in seen:
+                seen.add(slug)
+                slugs.append(slug)
+    return slugs
+
 # Stash for pytest_runtest_logreport, which only receives ``report`` as
 # an argument and so cannot reach ``config`` directly.
 _active_config: pytest.Config | None = None
@@ -50,21 +66,23 @@ def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
     for item in items:
-        marker = item.get_closest_marker("qms_covers")
-        if marker is None:
+        markers = list(item.iter_markers("qms_covers"))
+        if not markers:
             continue
-        slugs = list(marker.args)
-        if not slugs:
-            raise pytest.UsageError(
-                f"qms-coverage: {item.nodeid} declares @covers() with no slugs. "
-                f"Pass at least one AC slug, or remove the decorator."
-            )
-        for slug in slugs:
-            if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+        # Validate every marker (each stacked decorator is its own marker), so a
+        # `@covers()` with no slugs anywhere in the stack still fails fast.
+        for marker in markers:
+            if not marker.args:
                 raise pytest.UsageError(
-                    f"qms-coverage: {item.nodeid} has invalid slug {slug!r}. "
-                    f"Slugs must be kebab-case (lowercase letters, digits, single hyphens)."
+                    f"qms-coverage: {item.nodeid} declares @covers() with no slugs. "
+                    f"Pass at least one AC slug, or remove the decorator."
                 )
+            for slug in marker.args:
+                if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+                    raise pytest.UsageError(
+                        f"qms-coverage: {item.nodeid} has invalid slug {slug!r}. "
+                        f"Slugs must be kebab-case (lowercase letters, digits, single hyphens)."
+                    )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -75,10 +93,9 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     # setup/teardown failures are captured as test failures here too.
     if report.when != "call":
         return
-    marker = item.get_closest_marker("qms_covers")
-    if marker is None:
+    slugs = _covers_slugs(item)
+    if not slugs:
         return
-    slugs = list(marker.args)
     if report.outcome == "passed":
         status = "passed"
     elif report.outcome == "failed":
